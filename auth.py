@@ -1,95 +1,77 @@
-import os, hmac, time, hashlib, json
-import urllib.parse as up
+import os, hmac, time, hashlib, json, urllib.parse as up
 from fastapi import APIRouter, HTTPException
 from jose import jwt
 from pydantic import BaseModel
 import db
 
-# ──────────────────── env
-BOT_TOKEN  = os.getenv("BOT_TOKEN") or ""
+BOT_TOKEN  = os.getenv("BOT_TOKEN")  or ""
 JWT_SECRET = os.getenv("JWT_SECRET") or ""
 ALGO       = "HS256"
 
 if not BOT_TOKEN or not JWT_SECRET:
-    raise RuntimeError("BOT_TOKEN / JWT_SECRET not set")
+    raise RuntimeError("BOT_TOKEN or JWT_SECRET missing")
 
-# ──────────────────── router
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 class TelegramAuthIn(BaseModel):
     initData: str
 
 
-# ──────────────────── helpers
-def _build_check_string(init_data: str) -> tuple[str, str]:
-    """
-    Возвращает кортеж (check_string, hash_value).
-    check_string формируется БЕЗ URL-декодирования,
-    строго по правилам Telegram.
-    """
-    parts = init_data.split("&")
-    hash_value = ""
-    filtered: list[str] = []
-
-    for p in parts:
-        if p.startswith("hash="):
-            hash_value = p.split("=", 1)[1]
-        elif p.startswith("signature="):
-            # игнорируем новое поле
-            continue
-        else:
-            filtered.append(p)
-
-    # сортируем по ключу (до '=')
-    filtered.sort(key=lambda s: s.split("=", 1)[0])
-    check_string = "\n".join(filtered)
-    return check_string, hash_value
-
-
-def _parse_user(init_data: str) -> dict:
-    """Декодируем только чтобы достать user_id / first_name."""
-    parsed = up.parse_qs(init_data, keep_blank_values=True)
-    user_json = parsed["user"][0]
-    return json.loads(user_json)
-
-
+# ────────────────────────────────────────────────────────────
 def verify_telegram(init_data: str) -> dict:
-    check_string, client_hash = _build_check_string(init_data)
-    if not client_hash:
+    """
+    Проверяем подпись Telegram (HMAC-SHA-256).
+    Возвращаем dict user с id / имёнем.
+    """
+    # 1. разбираем (URL-декодирует!) → dict key → value
+    parsed = up.parse_qs(init_data, keep_blank_values=True)
+    data   = {k: v[0] for k, v in parsed.items()}
+
+    hash_client = data.pop("hash", None)
+    data.pop("signature", None)           # игнорируем новое поле
+
+    if not hash_client:
         raise HTTPException(400, "hash missing")
 
-    secret = hashlib.sha256(BOT_TOKEN.encode()).digest()
-    server_hash = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+    # 2. формируем check-string «key=value» (уже декодировано)
+    check_string = "\n".join(
+        f"{k}={data[k]}" for k in sorted(data)
+    )
 
+    secret   = hashlib.sha256(BOT_TOKEN.encode()).digest()
+    hash_srv = hmac.new(secret, check_string.encode(),
+                        hashlib.sha256).hexdigest()
+
+    # DEBUG
     print("[AUTH] BOT", BOT_TOKEN[:10], "...", BOT_TOKEN[-5:], flush=True)
-    print("[AUTH] client", client_hash, flush=True)
-    print("[AUTH] server", server_hash, flush=True)
+    print("[AUTH] client", hash_client, flush=True)
+    print("[AUTH] server", hash_srv,      flush=True)
 
-    if server_hash != client_hash:
+    if hash_srv != hash_client:
         raise HTTPException(401, "bad signature")
 
-    return _parse_user(init_data)
+    return json.loads(data["user"])
 
 
-# ──────────────────── endpoint
+# ────────────────────────────────────────────────────────────
 @router.post("/telegram")
-async def auth_telegram(body: TelegramAuthIn):
-    data = verify_telegram(body.initData)
+async def auth_telegram(payload: TelegramAuthIn):
+    user = verify_telegram(payload.initData)
 
-    tg_id  = int(data["id"])
-    first  = data.get("first_name", "")
+    tg_id = int(user["id"])
+    first = user.get("first_name", "")
 
     pool = await db.get_pool()
-    async with pool.acquire() as c:
-        await c.execute(
-            """
-            INSERT INTO users (telegram_id, first_name)
-            VALUES ($1,$2)
-            ON CONFLICT (telegram_id) DO NOTHING
-            """,
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO users (telegram_id, first_name)
+               VALUES ($1,$2)
+               ON CONFLICT (telegram_id) DO NOTHING""",
             tg_id, first
         )
 
-    token = jwt.encode({"sub": tg_id, "first": first, "iat": int(time.time())},
-                       JWT_SECRET, algorithm=ALGO)
+    token = jwt.encode(
+        {"sub": tg_id, "first": first, "iat": int(time.time())},
+        JWT_SECRET, algorithm=ALGO
+    )
     return {"access_token": token}
