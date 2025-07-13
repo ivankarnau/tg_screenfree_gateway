@@ -51,6 +51,10 @@ def verify_telegram(init_data: str) -> dict:
     secret_key   = hashlib.sha256(BOT_TOKEN.encode()).digest()
     calc_hash    = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
 
+    print("[AUTH] check_string =", check_string, flush=True)
+    print("[AUTH] client_hash  =", hash_value, flush=True)
+    print("[AUTH] server_hash  =", calc_hash, flush=True)
+
     if calc_hash != hash_value:
         raise HTTPException(401, "bad signature")
 
