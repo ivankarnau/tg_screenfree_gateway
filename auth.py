@@ -35,7 +35,6 @@ def verify_telegram(init_data: str) -> dict:
 
 @router.post("/telegram")
 async def auth_telegram(data_in: TelegramAuthIn):   # ← вместо Request
-    from main import get_pool
     data = verify_telegram(data_in.initData)
 
     tg_id = int(data["user_id"])
