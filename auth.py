@@ -1,11 +1,10 @@
 import hmac, hashlib, urllib.parse as up, os, time
+
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-from fastapi import Depends
-from fastapi import Request   # оставить, если нужно, можно убрать
 from jose import jwt
 
-import db    
+import db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -13,10 +12,10 @@ BOT_TOKEN  = os.getenv("BOT_TOKEN")
 JWT_SECRET = os.getenv("JWT_SECRET")
 ALGO = "HS256"
 
-# ---------- NEW: модель тела запроса --------------------------------
+
 class TelegramAuthIn(BaseModel):
     initData: str
-# --------------------------------------------------------------------
+
 
 def verify_telegram(init_data: str) -> dict:
     parsed = up.parse_qs(init_data, keep_blank_values=True)
@@ -33,15 +32,16 @@ def verify_telegram(init_data: str) -> dict:
         raise HTTPException(401, "bad signature")
     return data_dict
 
+
 @router.post("/telegram")
-async def auth_telegram(data_in: TelegramAuthIn):   # ← вместо Request
+async def auth_telegram(data_in: TelegramAuthIn):
     data = verify_telegram(data_in.initData)
 
-    tg_id = int(data["user_id"])
-    first = data.get("first_name", "")
+    tg_id  = int(data["user_id"])
+    first  = data.get("first_name", "")
 
     # сохраняем пользователя
-    pool = await db.get_pool(router.app)
+    pool = await db.get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO users (telegram_id, first_name)
@@ -50,5 +50,5 @@ async def auth_telegram(data_in: TelegramAuthIn):   # ← вместо Request
         """, tg_id, first)
 
     payload = {"sub": tg_id, "first": first, "iat": int(time.time())}
-    token = jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
+    token   = jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
     return {"access_token": token}

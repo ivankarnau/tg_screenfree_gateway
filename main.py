@@ -1,8 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 from auth import router as auth_router
-import db                         # ← наш модуль с пулом
+import db
 
 app = FastAPI()
 app.add_event_handler("startup", db.attach_pool(app))
@@ -24,30 +25,28 @@ app.add_middleware(
 )
 # ------------------------------------------------------------------
 
-# ---------- DB: создаём таблицу users на старте -------------------
+# ---------- создаём таблицу users, если её нет --------------------
 @app.on_event("startup")
 async def ensure_tables():
     pool = await db.get_pool(app)
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id           serial       PRIMARY KEY,
                 telegram_id  bigint       UNIQUE,
                 first_name   text,
                 created_at   timestamptz  DEFAULT now()
             );
-            """
-        )
+        """)
 # ------------------------------------------------------------------
 
-# ---------- PING --------------------------------------------------
+# ---------- healthcheck -------------------------------------------
 @app.get("/ping")
 async def ping():
     return {"pong": "🏓"}
 # ------------------------------------------------------------------
 
-# ---------- SIMPLE BALANCE STUB ----------------------------------
+# ---------- simple balance stub -----------------------------------
 class BalanceOut(BaseModel):
     user_id: int
     balance: int
