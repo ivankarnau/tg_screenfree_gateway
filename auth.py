@@ -1,9 +1,5 @@
 # auth.py
-import os
-import time
-import json
-import urllib.parse as up
-
+import os, time, json, urllib.parse as up
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from jose import jwt
@@ -45,7 +41,7 @@ def verify_init_data(raw_qs: str) -> dict:
 async def auth_telegram(data: AuthTelegramRequest):
     user = verify_init_data(data.initData)
     token = jwt.encode(
-        {"sub": str(user["id"]), "first": user.get("first_name", ""), "iat": int(time.time())},
+        {"sub": str(user["id"]), "first": user.get("first_name",""), "iat": int(time.time())},
         JWT_SECRET,
         algorithm=ALGO,
     )

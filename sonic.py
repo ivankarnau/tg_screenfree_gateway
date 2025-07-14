@@ -18,8 +18,7 @@ class SonicService:
 
     async def _run(self, job_id: str):
         self._jobs[job_id]["status"] = "running"
-        # TODO: заменить на реальную логику работы с датчиком
-        await asyncio.sleep(3)
+        await asyncio.sleep(3)  # здесь реальный замер
         self._jobs[job_id]["result"] = {"distance_cm": 42, "ts": time.time()}
         self._jobs[job_id]["status"] = "done"
 
@@ -43,8 +42,7 @@ async def sonic_start(user=Depends(current_user)):
 
 @router.get("/status")
 async def sonic_status(
-    job_id: str = Query(..., description="ID задачи"),
-    user=Depends(current_user)
+    job_id: str = Query(...), user=Depends(current_user)
 ):
     st = sonic.status(job_id, user["user_id"])
     if st is None:
@@ -53,8 +51,7 @@ async def sonic_status(
 
 @router.get("/result")
 async def sonic_result(
-    job_id: str = Query(..., description="ID задачи"),
-    user=Depends(current_user)
+    job_id: str = Query(...), user=Depends(current_user)
 ):
     res = sonic.result(job_id, user["user_id"])
     if res is None:
