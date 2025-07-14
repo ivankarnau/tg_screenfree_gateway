@@ -15,6 +15,10 @@ from init_data_py.errors import (
     AuthDateMissingError, ExpiredError, UnexpectedFormatError
 )
 
+from wallet import router as wallet_router
+from sonic import router as sonic_router
+
+
 # === Подхватываем переменные из ENV Railway ===
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -25,6 +29,9 @@ ALGORITHM = "HS256"
 
 app = FastAPI(title="ScreenFree Gateway")
 bearer_scheme = HTTPBearer()
+
+app.include_router(wallet_router)
+app.include_router(sonic_router)
 
 # === CORS: теперь пропускаем любые origin и любые методы (включая OPTIONS) ===
 app.add_middleware(
