@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from deps import current_user
 from fastapi import Depends
 
+
 import db
 from auth import router as auth_router     # ← теперь импорт проходит
 
@@ -23,10 +24,12 @@ origins = [
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["https://tg-screenfree.vercel.app", 
+                   "https://tgscreenfreegateway-production.up.railway.app",
+                   "*"],  # на проде лучше сузить список!
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],    # важно: разрешаем Authorization
 )
 # ─── ensure tables -----------------------------------------------------
 @app.on_event("startup")
