@@ -1,6 +1,8 @@
 # main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from deps import current_user
+from fastapi import Depends
 
 import db
 from auth import router as auth_router     # ← теперь импорт проходит
@@ -52,5 +54,5 @@ class BalanceOut(BaseModel):
     balance: int
 
 @app.get("/wallet/balance", response_model=BalanceOut)
-async def balance(user_id: int = 1):
-    return {"user_id": user_id, "balance": 0}
+async def balance(user=Depends(current_user)):
+    return {"user_id": user["sub"], "balance": 0}
