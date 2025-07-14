@@ -1,5 +1,9 @@
-# auth.py :contentReference[oaicite:7]{index=7}
-import os, time, json, urllib.parse as up
+# auth.py
+import os
+import time
+import json
+import urllib.parse as up
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from jose import jwt
@@ -16,27 +20,32 @@ if not BOT_TOKEN or not JWT_SECRET:
     raise RuntimeError("BOT_TOKEN и JWT_SECRET должны быть заданы")
 
 ALGO = "HS256"
-router = APIRouter(prefix="/auth")
+router = APIRouter(prefix="/auth", tags=["auth"])
 
-class TGIn(BaseModel):
+class AuthTelegramRequest(BaseModel):
     initData: str
 
-def verify(raw_qs: str) -> dict:
+class AuthTelegramResponse(BaseModel):
+    access_token: str
+
+def verify_init_data(raw_qs: str) -> dict:
     try:
         InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24*3600)
-    except (SignInvalidError, SignMissingError,
-            AuthDateMissingError, ExpiredError,
-            UnexpectedFormatError) as e:
+    except (
+        SignInvalidError, SignMissingError,
+        AuthDateMissingError, ExpiredError,
+        UnexpectedFormatError
+    ) as e:
         raise HTTPException(401, f"bad signature: {e}")
     user_qs = up.parse_qs(raw_qs)["user"][0]
     user_json = up.unquote_plus(user_qs)
     return json.loads(user_json)
 
-@router.post("/telegram")
-async def auth(body: TGIn):
-    u = verify(body.initData)
+@router.post("/telegram", response_model=AuthTelegramResponse)
+async def auth_telegram(data: AuthTelegramRequest):
+    user = verify_init_data(data.initData)
     token = jwt.encode(
-        {"sub": u["id"], "first": u.get("first_name",""), "iat": int(time.time())},
+        {"sub": str(user["id"]), "first": user.get("first_name", ""), "iat": int(time.time())},
         JWT_SECRET,
         algorithm=ALGO,
     )

@@ -1,6 +1,6 @@
 # deps.py
 import os
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 
@@ -9,14 +9,25 @@ if not JWT_SECRET:
     raise RuntimeError("JWT_SECRET не задана в окружении")
 
 ALGO = "HS256"
-bearer_scheme = HTTPBearer()
+bearer = HTTPBearer()
 
 def current_user(
-    cred: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    creds: HTTPAuthorizationCredentials = Depends(bearer)
 ):
-    token = cred.credentials
+    token = creds.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGO])
-        return payload
     except JWTError:
-        raise HTTPException(401, detail="Invalid JWT")
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid JWT",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    sub = payload.get("sub")
+    if sub is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid token: missing sub",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"user_id": int(sub)}
