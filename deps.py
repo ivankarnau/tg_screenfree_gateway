@@ -1,17 +1,22 @@
 # deps.py
-from fastapi import Header, HTTPException
-from jose import jwt, JWTError
 import os
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
 
-SECRET = os.getenv("JWT_SECRET")
-ALGO   = "HS256"
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET не задана в окружении")
 
-def current_user(auth: str = Header(None, alias="Authorization")):
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing JWT")
-    token = auth.split()[1]
+ALGO = "HS256"
+bearer_scheme = HTTPBearer()
+
+def current_user(
+    cred: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+):
+    token = cred.credentials
     try:
-        payload = jwt.decode(token, SECRET, algorithms=[ALGO])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGO])
+        return payload
     except JWTError:
-        raise HTTPException(401, "Invalid JWT")
-    return payload              # {sub: <telegram_id>, first: ...}
+        raise HTTPException(401, detail="Invalid JWT")
