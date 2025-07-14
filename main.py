@@ -1,46 +1,39 @@
 # main.py
 
-import os
-import time
-from typing import Optional
-
+import os, time, json, urllib.parse as up
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from jose import jwt, JWTError
 
 from init_data_py import InitData
 from init_data_py.errors import (
     SignInvalidError, SignMissingError,
-    AuthDateMissingError, ExpiredError,
-    UnexpectedFormatError,
+    AuthDateMissingError, ExpiredError, UnexpectedFormatError
 )
 
-# === Настройка из ENV ===
+# === ENV vars из Railway ===
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not BOT_TOKEN or not JWT_SECRET:
-    raise RuntimeError("❌ В ENV должны быть BOT_TOKEN и JWT_SECRET")
+    raise RuntimeError("❌ Задайте BOT_TOKEN и JWT_SECRET в ENV Railway")
 
 ALGORITHM = "HS256"
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/telegram")
 
 app = FastAPI(title="ScreenFree Gateway")
+bearer_scheme = HTTPBearer()
 
-# === CORS Middleware ===
-# замените origin на ваш фронтенд, или оставьте ["*"] для теста
-origins = [
-    "https://tg-screenfree.vercel.app",
-    "https://www.tg-screenfree.vercel.app",
-    # "http://localhost:5173",  # если локально тестируете фронт
-]
+# === CORS ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "https://tg-screenfree.vercel.app",
+        "https://www.tg-screenfree.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["*"],
 )
 
 # === Схемы ===
@@ -51,53 +44,55 @@ class BalanceResponse(BaseModel):
     user_id: int
     balance: int
 
-# === Хелперы ===
+# === Валидация initData от Telegram ===
 def verify_init_data(raw_qs: str) -> dict:
     try:
-        InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24 * 3600)
+        InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24*3600)
     except (SignInvalidError, SignMissingError,
             AuthDateMissingError, ExpiredError,
             UnexpectedFormatError) as e:
         raise HTTPException(status_code=401, detail=f"bad signature: {e}")
-    # Извлекаем JSON-пользователя из initData
-    import urllib.parse as up, json
-    user_part = up.parse_qs(raw_qs)["user"][0]
+    qs = up.parse_qs(raw_qs)
+    user_part = qs["user"][0]
     user_json = up.unquote_plus(user_part)
     return json.loads(user_json)
 
-# === Эндпоинты ===
+# === /auth/telegram ===
 @app.post("/auth/telegram")
-async def auth_telegram(body: AuthRequest):
-    user = verify_init_data(body.initData)
+async def auth_telegram(data: AuthRequest):
+    user = verify_init_data(data.initData)
     payload = {
-        "sub": str(user["id"]),       # sub как строка
+        "sub": str(user["id"]),
         "first": user.get("first_name", ""),
         "iat": int(time.time()),
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
     return {"access_token": token}
 
-def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+# === Получаем user из Bearer токена ===
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+):
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[ALGORITHM])
     except JWTError:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     sub = payload.get("sub")
     if sub is None:
-        raise credentials_exception
+        raise HTTPException(status_code=401, detail="Missing sub")
     return {"user_id": int(sub)}
 
+# === /wallet/balance ===
 @app.get("/wallet/balance", response_model=BalanceResponse)
-async def get_balance(current_user: dict = Depends(get_current_user)):
-    # Здесь вместо 0 верните настоящий баланс из БД
-    return BalanceResponse(user_id=current_user["user_id"], balance=0)
+async def get_balance(user=Depends(get_current_user)):
+    # TODO: Замените на логику из вашей БД
+    return BalanceResponse(user_id=user["user_id"], balance=0)
 
-# (Можно добавить /ping для проверки живости)
+# === /ping для проверки жизни ===
 @app.get("/ping")
 async def ping():
     return {"pong": True}
