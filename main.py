@@ -1,59 +1,85 @@
-# main.py :contentReference[oaicite:8]{index=8}
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
+# main.py
+import os
+import time
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
+from jose import jwt, JWTError
 
-import db
-from auth import router as auth_router
-from deps import current_user
-
-app = FastAPI()
-
-# подключаем пул при старте
-app.add_event_handler("startup", db.attach_pool(app))
-
-# CORS
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-    "https://tg-screenfree.vercel.app",
-    "https://tgscreenfreegateway-production.up.railway.app",
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],      # для продакшена сузьте список
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],      # важно разрешить Authorization
+from init_data_py import InitData
+from init_data_py.errors import (
+    SignInvalidError, SignMissingError,
+    AuthDateMissingError, ExpiredError,
+    UnexpectedFormatError,
 )
 
-app.include_router(auth_router)
+BOT_TOKEN  = os.getenv("BOT_TOKEN")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not BOT_TOKEN or not JWT_SECRET:
+    raise RuntimeError("❌ BOT_TOKEN и JWT_SECRET должны быть заданы в переменных окружения")
 
-@app.on_event("startup")
-async def ensure_tables():
-    pool = await db.get_pool(app)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id           serial       PRIMARY KEY,
-                telegram_id  bigint       UNIQUE,
-                first_name   text,
-                created_at   timestamptz  DEFAULT now()
-            );
-            """
-        )
+ALGO = "HS256"
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/telegram")
 
-@app.get("/ping")
-async def ping():
-    return {"pong": "🏓"}
+app = FastAPI(title="ScreenFree Gateway API")
 
-class BalanceOut(BaseModel):
+
+class AuthRequest(BaseModel):
+    initData: str
+
+
+class BalanceResponse(BaseModel):
     user_id: int
     balance: int
 
-@app.get("/wallet/balance", response_model=BalanceOut)
-async def balance(user=Depends(current_user)):
-    return {"user_id": user["sub"], "balance": 0}
+
+def verify_init_data(raw_qs: str) -> dict:
+    try:
+        InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24 * 3600)
+    except (SignInvalidError, SignMissingError,
+            AuthDateMissingError, ExpiredError,
+            UnexpectedFormatError) as e:
+        raise HTTPException(status_code=401, detail=f"bad signature: {e}")
+    # достаём JSON-пользователя
+    import urllib.parse as up, json
+    user_json = up.unquote_plus(up.parse_qs(raw_qs)["user"][0])
+    return json.loads(user_json)
+
+
+@app.post("/auth/telegram")
+async def auth_telegram(body: AuthRequest):
+    user = verify_init_data(body.initData)
+    # кодируем JWT: sub должен быть строкой, чтобы OAuth2PasswordBearer не ругался
+    payload = {
+        "sub": str(user["id"]),
+        "first": user.get("first_name", ""),
+        "iat": int(time.time()),
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
+    return {"access_token": token}
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGO])
+    except JWTError:
+        raise credentials_exception
+    # проверяем обязательное поле sub
+    sub = payload.get("sub")
+    if sub is None:
+        raise credentials_exception
+    return {"user_id": int(sub)}
+
+
+@app.get("/wallet/balance", response_model=BalanceResponse)
+async def get_balance(current_user: dict = Depends(get_current_user)):
+    # Здесь ваш реальный код: запрос к БД, вычисление баланса и т.д.
+    # Для примера — возвращаем 0
+    return BalanceResponse(user_id=current_user["user_id"], balance=0)
