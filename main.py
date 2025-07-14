@@ -1,6 +1,8 @@
-# main.py
+import os
+import time
+import json
+import urllib.parse as up
 
-import os, time, json, urllib.parse as up
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -13,7 +15,7 @@ from init_data_py.errors import (
     AuthDateMissingError, ExpiredError, UnexpectedFormatError
 )
 
-# === ENV vars из Railway ===
+# === Подхватываем переменные из ENV Railway ===
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not BOT_TOKEN or not JWT_SECRET:
@@ -24,19 +26,16 @@ ALGORITHM = "HS256"
 app = FastAPI(title="ScreenFree Gateway")
 bearer_scheme = HTTPBearer()
 
-# === CORS ===
+# === CORS: теперь пропускаем любые origin и любые методы (включая OPTIONS) ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://tg-screenfree.vercel.app",
-        "https://www.tg-screenfree.vercel.app",
-    ],
+    allow_origins=["*"],        # временно разрешаем все origin
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["*"],        # GET, POST, OPTIONS и т.п.
+    allow_headers=["*"],        # Authorization и любые другие заголовки
 )
 
-# === Схемы ===
+# === Схемы входных/выходных данных ===
 class AuthRequest(BaseModel):
     initData: str
 
@@ -44,7 +43,7 @@ class BalanceResponse(BaseModel):
     user_id: int
     balance: int
 
-# === Валидация initData от Telegram ===
+# === Проверка initData от Telegram ===
 def verify_init_data(raw_qs: str) -> dict:
     try:
         InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24*3600)
@@ -57,7 +56,7 @@ def verify_init_data(raw_qs: str) -> dict:
     user_json = up.unquote_plus(user_part)
     return json.loads(user_json)
 
-# === /auth/telegram ===
+# === Эндпоинт авторизации через Telegram ===
 @app.post("/auth/telegram")
 async def auth_telegram(data: AuthRequest):
     user = verify_init_data(data.initData)
@@ -66,10 +65,10 @@ async def auth_telegram(data: AuthRequest):
         "first": user.get("first_name", ""),
         "iat": int(time.time()),
     }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
-    return {"access_token": token}
+    access_token = jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
+    return {"access_token": access_token}
 
-# === Получаем user из Bearer токена ===
+# === Депенд на получение текущего юзера из Bearer-токена ===
 def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)
 ):
@@ -86,13 +85,13 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Missing sub")
     return {"user_id": int(sub)}
 
-# === /wallet/balance ===
+# === Эндпоинт для получения баланса ===
 @app.get("/wallet/balance", response_model=BalanceResponse)
 async def get_balance(user=Depends(get_current_user)):
-    # TODO: Замените на логику из вашей БД
+    # TODO: здесь вместо заглушки нужно достать реальные данные из БД
     return BalanceResponse(user_id=user["user_id"], balance=0)
 
-# === /ping для проверки жизни ===
+# === Просто healthcheck ===
 @app.get("/ping")
 async def ping():
     return {"pong": True}
