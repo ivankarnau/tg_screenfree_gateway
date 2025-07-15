@@ -1,16 +1,19 @@
-# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from auth import router as auth_router
 from wallet import router as wallet_router
+from bank_mock import router as bank_router
 from sonic import router as sonic_router
 from db import init_db, close_db
 
 app = FastAPI(title="ScreenFree Gateway")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-    allow_headers=["*"], allow_credentials=True
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True
 )
 
 @app.on_event("startup")
@@ -23,6 +26,7 @@ async def on_shutdown():
 
 app.include_router(auth_router)
 app.include_router(wallet_router)
+app.include_router(bank_router)
 app.include_router(sonic_router)
 
 @app.get("/ping")

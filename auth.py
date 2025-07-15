@@ -1,4 +1,3 @@
-# auth.py
 import os, time, json, urllib.parse as up
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -6,7 +5,7 @@ from jose import jwt
 from init_data_py import InitData
 from init_data_py.errors import (
     SignInvalidError, SignMissingError,
-    AuthDateMissingError, ExpiredError, UnexpectedFormatError,
+    AuthDateMissingError, ExpiredError, UnexpectedFormatError
 )
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
@@ -36,7 +35,6 @@ async def auth(body: TGIn):
     u = verify(body.initData)
     token = jwt.encode(
         {"sub": u["id"], "first": u.get("first_name",""), "iat": int(time.time())},
-        JWT_SECRET,
-        algorithm=ALGO,
+        JWT_SECRET, algorithm=ALGO
     )
     return {"access_token": token}
