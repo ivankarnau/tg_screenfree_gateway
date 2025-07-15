@@ -1,8 +1,6 @@
 # auth.py
 import os
 import time
-import json
-import urllib.parse as up
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -22,48 +20,44 @@ from db import get_pool
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN or not JWT_SECRET:
-    raise RuntimeError("BOT_TOKEN и JWT_SECRET должны быть заданы")
+    raise RuntimeError("BOT_TOKEN и JWT_SECRET должны быть заданы в окружении")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 class AuthRequest(BaseModel):
     init_data: str
 
-def verify_init_data(raw: str) -> dict:
+def verify_init_data(raw: str):
     """
     Парсит и валидирует init_data от Telegram.
-    Если подпись или срок годности не проходят — бросает HTTPException(401).
-    Возвращает payload.user из Telegram.
+    Возвращает объект User (из init_data_py.types), у которого есть .id, .first_name и т.д.
     """
     try:
-        obj = InitData.parse(raw)
-        obj.validate(BOT_TOKEN, lifetime=24 * 3600)
-    except (SignInvalidError, SignMissingError,
-            AuthDateMissingError, ExpiredError,
-            UnexpectedFormatError) as e:
+        init = InitData.parse(raw)
+        # lifetime в секундах, например, сутки
+        init.validate(bot_token=BOT_TOKEN, lifetime=24 * 3600)
+    except (
+        SignInvalidError,
+        SignMissingError,
+        AuthDateMissingError,
+        ExpiredError,
+        UnexpectedFormatError,
+    ) as e:
         raise HTTPException(401, f"Invalid init_data: {e}")
 
-    # Внутри InitData.payload хранится словарь со всеми полями, включая 'user' — строку JSON.
-    user_json = obj.payload.get("user")
-    if not user_json:
+    user = init.user  # здесь — Typed User объект
+    if not user or not hasattr(user, "id"):
         raise HTTPException(400, "No user info in init_data")
-
-    # user_json приходит закодированной, поэтому декодируем
-    try:
-        user = json.loads(user_json)
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Bad user JSON")
-
     return user
 
 @router.post("/telegram")
 async def auth_telegram(body: AuthRequest):
-    # 1) разбираем и проверяем init_data
+    # 1) Распарсили и проверили init_data
     user = verify_init_data(body.init_data)
-    telegram_id = int(user["id"])
-    first_name = user.get("first_name", "")
+    telegram_id = int(user.id)
+    first_name = user.first_name or ""
 
-    # 2) создаём/апдейтим запись в users + гарантия строки wallets
+    # 2) Сохраняем пользователя и кошелёк
     pool = get_pool()
     async with pool.acquire() as conn:
         rec = await conn.fetchrow(
@@ -77,6 +71,7 @@ async def auth_telegram(body: AuthRequest):
             telegram_id, first_name
         )
         user_id = rec["id"]
+        # гарантируем, что у него есть запись в wallets
         await conn.execute(
             """
             INSERT INTO wallets (user_id)
@@ -86,12 +81,12 @@ async def auth_telegram(body: AuthRequest):
             user_id
         )
 
-    # 3) генерируем JWT
+    # 3) Генерируем JWT
     now = int(time.time())
     payload = {
         "sub": str(telegram_id),
         "iat": now,
-        "exp": now + 7 * 24 * 3600  # например, токен живёт неделю
+        "exp": now + 7 * 24 * 3600,
     }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
-    return {"access_token": token}
+    access_token = jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
+    return {"access_token": access_token}
