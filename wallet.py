@@ -1,5 +1,3 @@
-# gateway/wallet.py
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from uuid import uuid4
@@ -10,34 +8,28 @@ from db import get_pool
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
-
 class BalanceOut(BaseModel):
     available: float
     reserved: float
 
-
 class TopUpIn(BaseModel):
     amount: float
 
-
-class IssueTokenIn(BaseModel):
-    amount: float
-
-
-class TokenInfo(BaseModel):
+class TokenOut(BaseModel):
     token_id: str
     amount: float
     created_at: datetime
     redeemed_at: datetime | None = None
 
+class ReserveIn(BaseModel):
+    amount: float
+
+class RedeemIn(BaseModel):
+    token_id: str
+    to_user_id: int  # Кому переводим этот токен
 
 @router.get("/balance", response_model=BalanceOut)
 async def get_balance(user=Depends(current_user)):
-    """
-    Возвращает два баланса:
-      - available — доступные средства
-      - reserved  — замороженные в токенах
-    """
     pool = get_pool()
     async with pool.acquire() as conn:
         rec = await conn.fetchrow(
@@ -51,12 +43,8 @@ async def get_balance(user=Depends(current_user)):
         reserved=float(rec["reserved"])
     )
 
-
 @router.post("/topup", response_model=BalanceOut)
 async def topup(payload: TopUpIn, user=Depends(current_user)):
-    """
-    Увеличивает available на указанную положительную сумму.
-    """
     amt = payload.amount
     if amt <= 0:
         raise HTTPException(400, "Сумма должна быть > 0")
@@ -75,47 +63,8 @@ async def topup(payload: TopUpIn, user=Depends(current_user)):
         reserved=float(rec["reserved"])
     )
 
-
-@router.post("/issue-token", response_model=TokenInfo)
-async def issue_token(payload: IssueTokenIn, user=Depends(current_user)):
-    """
-    Резервирует сумму из available → reserved и выдаёт token_id.
-    """
-    amt = payload.amount
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rec = await conn.fetchrow(
-            "SELECT available, reserved FROM wallets WHERE user_id = $1",
-            user["user_id"]
-        )
-        if rec is None:
-            raise HTTPException(404, "Кошелёк не найден")
-        if amt <= 0 or amt > float(rec["available"]):
-            raise HTTPException(400, "Недостаточно доступных средств")
-        token_id = str(uuid4())
-        # Обновляем балансы
-        await conn.execute(
-            "UPDATE wallets SET available = available - $1, reserved = reserved + $1 WHERE user_id = $2",
-            amt, user["user_id"]
-        )
-        # Сохраняем токен
-        await conn.execute(
-            "INSERT INTO tokens (token_id, user_id, amount) VALUES ($1, $2, $3)",
-            token_id, user["user_id"], amt
-        )
-    return TokenInfo(
-        token_id=token_id,
-        amount=amt,
-        created_at=datetime.utcnow(),
-        redeemed_at=None
-    )
-
-
-@router.get("/list-tokens", response_model=list[TokenInfo])
-async def list_tokens(user=Depends(current_user)):
-    """
-    Список всех активных (не выкупленных) токенов пользователя.
-    """
+@router.get("/tokens", response_model=list[TokenOut])
+async def get_tokens(user=Depends(current_user)):
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -123,13 +72,12 @@ async def list_tokens(user=Depends(current_user)):
             SELECT token_id, amount, created_at, redeemed_at
               FROM tokens
              WHERE user_id = $1
-               AND redeemed_at IS NULL
              ORDER BY created_at DESC
             """,
             user["user_id"]
         )
     return [
-        TokenInfo(
+        TokenOut(
             token_id=str(r["token_id"]),
             amount=float(r["amount"]),
             created_at=r["created_at"],
@@ -137,3 +85,70 @@ async def list_tokens(user=Depends(current_user)):
         )
         for r in rows
     ]
+
+@router.post("/reserve", response_model=TokenOut)
+async def reserve_token(payload: ReserveIn, user=Depends(current_user)):
+    amt = payload.amount
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rec = await conn.fetchrow(
+            "SELECT available FROM wallets WHERE user_id = $1",
+            user["user_id"]
+        )
+        if not rec or amt <= 0 or amt > float(rec["available"]):
+            raise HTTPException(400, "Недостаточно свободных средств")
+        token_id = str(uuid4())
+        await conn.execute(
+            "UPDATE wallets SET available = available - $1, reserved = reserved + $1 WHERE user_id = $2",
+            amt, user["user_id"]
+        )
+        await conn.execute(
+            "INSERT INTO tokens (token_id, user_id, amount) VALUES ($1, $2, $3)",
+            token_id, user["user_id"], amt
+        )
+        row = await conn.fetchrow(
+            "SELECT token_id, amount, created_at, redeemed_at FROM tokens WHERE token_id = $1",
+            token_id
+        )
+    return TokenOut(
+        token_id=str(row["token_id"]),
+        amount=float(row["amount"]),
+        created_at=row["created_at"],
+        redeemed_at=row["redeemed_at"]
+    )
+
+@router.post("/redeem", response_model=TokenOut)
+async def redeem_token(payload: RedeemIn, user=Depends(current_user)):
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM tokens WHERE token_id = $1 AND user_id = $2 AND redeemed_at IS NULL",
+            payload.token_id, user["user_id"]
+        )
+        if not row:
+            raise HTTPException(404, "Токен не найден или уже использован")
+        # списываем reserved
+        await conn.execute(
+            "UPDATE wallets SET reserved = reserved - $1 WHERE user_id = $2",
+            row["amount"], user["user_id"]
+        )
+        # зачисляем получателю
+        await conn.execute(
+            "UPDATE wallets SET available = available + $1 WHERE user_id = $2",
+            row["amount"], payload.to_user_id
+        )
+        # отмечаем токен как погашенный
+        await conn.execute(
+            "UPDATE tokens SET redeemed_at = now() WHERE token_id = $1",
+            payload.token_id
+        )
+        row2 = await conn.fetchrow(
+            "SELECT token_id, amount, created_at, redeemed_at FROM tokens WHERE token_id = $1",
+            payload.token_id
+        )
+    return TokenOut(
+        token_id=str(row2["token_id"]),
+        amount=float(row2["amount"]),
+        created_at=row2["created_at"],
+        redeemed_at=row2["redeemed_at"]
+    )
