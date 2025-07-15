@@ -1,40 +1,44 @@
-import os, time, json, urllib.parse as up
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from init_data_py import validate_init_data
+from deps import JWT_SECRET, ALGORITHM
 from jose import jwt
-from init_data_py import InitData
-from init_data_py.errors import (
-    SignInvalidError, SignMissingError,
-    AuthDateMissingError, ExpiredError, UnexpectedFormatError
-)
-
-BOT_TOKEN  = os.getenv("BOT_TOKEN")
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not BOT_TOKEN or not JWT_SECRET:
-    raise RuntimeError("BOT_TOKEN и JWT_SECRET должны быть заданы")
+from db import get_pool
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-ALGO = "HS256"
 
-class TGIn(BaseModel):
-    initData: str
-
-def verify(raw_qs: str) -> dict:
-    try:
-        InitData.parse(raw_qs).validate(BOT_TOKEN, lifetime=24*3600)
-    except (SignInvalidError, SignMissingError,
-            AuthDateMissingError, ExpiredError,
-            UnexpectedFormatError) as e:
-        raise HTTPException(401, f"bad signature: {e}")
-    user_qs = up.parse_qs(raw_qs)["user"][0]
-    user_json = up.unquote_plus(user_qs)
-    return json.loads(user_json)
+class AuthRequest(BaseModel):
+    init_data: str   # <— обязательно snake_case
 
 @router.post("/telegram")
-async def auth(body: TGIn):
-    u = verify(body.initData)
-    token = jwt.encode(
-        {"sub": u["id"], "first": u.get("first_name",""), "iat": int(time.time())},
-        JWT_SECRET, algorithm=ALGO
-    )
+async def auth_telegram(data: AuthRequest):
+    # 1) проверяем подпись от Telegram
+    ok, payload = validate_init_data(data.init_data, JWT_SECRET)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid init_data")
+
+    # 2) создаём/апдейтим пользователя
+    telegram_id = int(payload["id"])
+    first = payload.get("first_name", "")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rec = await conn.fetchrow(
+            """INSERT INTO users (telegram_id, first_name)
+               VALUES ($1, $2)
+               ON CONFLICT (telegram_id) DO UPDATE
+                 SET first_name=EXCLUDED.first_name
+               RETURNING id""",
+            telegram_id, first
+        )
+        uid = rec["id"]
+        # гарантируем, что есть запись в wallets
+        await conn.execute(
+            """INSERT INTO wallets (user_id)
+               VALUES ($1)
+               ON CONFLICT (user_id) DO NOTHING""",
+            uid
+        )
+
+    # 3) отдаем JWT
+    token = jwt.encode({"sub": str(telegram_id)}, JWT_SECRET, algorithm=ALGORITHM)
     return {"access_token": token}
