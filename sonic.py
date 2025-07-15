@@ -1,119 +1,159 @@
-# sonic.py
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from deps import current_user
-from pydantic import BaseModel
-import asyncio, time
+# gateway/sonic.py
+
+import asyncio
+import time
 from typing import Dict
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from deps import current_user
+from db import get_pool
 
 router = APIRouter(prefix="/sonic", tags=["sonic"])
 
-# Существующий сервис для фоновых замеров
+
+# ----------------------------------
+# 1) Сервис фоновых измерений
+# ----------------------------------
 class SonicService:
     def __init__(self):
+        # job_id → { user: uid, status: str, result: dict | None }
         self._jobs: Dict[str, Dict] = {}
 
     async def start(self, uid: int) -> str:
         job_id = str(time.time_ns())
         self._jobs[job_id] = {"user": uid, "status": "pending", "result": None}
+        # запускаем фоновую задачу
         asyncio.create_task(self._run(job_id))
         return job_id
 
     async def _run(self, job_id: str):
+        # меняем статус, ждём 3 секунды (имитация замера)
         self._jobs[job_id]["status"] = "running"
-        await asyncio.sleep(3)  # здесь будет реальный замер
-        # имитируем результат 42 см
-        self._jobs[job_id]["result"] = {"distance_cm": 42, "ts": time.time()}
+        await asyncio.sleep(3)
+        # записываем результат
+        self._jobs[job_id]["result"] = {"distance_cm": 42, "timestamp": time.time()}
         self._jobs[job_id]["status"] = "done"
 
-    def status(self, job_id: str, uid: int):
+    def status(self, job_id: str, uid: int) -> str | None:
         job = self._jobs.get(job_id)
         if not job or job["user"] != uid:
             return None
         return job["status"]
 
-    def result(self, job_id: str, uid: int):
+    def result(self, job_id: str, uid: int) -> dict | None:
         job = self._jobs.get(job_id)
         if not job or job["user"] != uid:
             return None
         return job["result"]
 
+
 sonic = SonicService()
 
-# 1) Фоновые роуты, как было
+
 @router.post("/start")
 async def sonic_start(user=Depends(current_user)):
-    return {"job_id": await sonic.start(user["user_id"])}
+    """
+    Запускает фоновый ультразвуковой замер.
+    Возвращает job_id для последующего опроса.
+    """
+    job_id = await sonic.start(user["user_id"])
+    return {"job_id": job_id}
+
 
 @router.get("/status")
 async def sonic_status(
-    job_id: str = Query(...), user=Depends(current_user)
+    job_id: str = Query(..., description="ID задачи замера"),
+    user=Depends(current_user),
 ):
+    """
+    Возвращает статус замера: pending → running → done
+    """
     st = sonic.status(job_id, user["user_id"])
     if st is None:
         raise HTTPException(404, "Job not found")
     return {"status": st}
 
+
 @router.get("/result")
 async def sonic_result(
-    job_id: str = Query(...), user=Depends(current_user)
+    job_id: str = Query(..., description="ID задачи замера"),
+    user=Depends(current_user),
 ):
+    """
+    После статуса = done возвращает результат { distance_cm, timestamp }.
+    """
     res = sonic.result(job_id, user["user_id"])
     if res is None:
-        raise HTTPException(404, "Result not ready")
+        raise HTTPException(404, "Result not ready or not found")
     return res
 
-# 2) Новый роут для P2P-перевода «по ультразвуку»
+
+# ----------------------------------
+# 2) P2P-перевод “по ультразвуку”
+# ----------------------------------
 class TransferRequest(BaseModel):
     to_user_id: int
+
 
 @router.post("/transfer")
 async def sonic_transfer(
     req: TransferRequest,
-    request: Request,
-    user=Depends(current_user)
+    user=Depends(current_user),
 ):
-    pool    = request.app.state.db
+    """
+    Имитирует замер (3 сек) и списывает из available=distance_cm ₽,
+    переводит их пользователю to_user_id и сохраняет в таблицу transfers.
+    """
     from_id = user["user_id"]
-    to_id   = req.to_user_id
+    to_id = req.to_user_id
 
-    # 2.1) Имитация замера
-    # (в реале здесь будет вызов вашего драйвера)
-    await asyncio.sleep(2)
-    distance_cm = 42.0  # пусть 1 см = 1 ₽
+    # 1) имитируем сам ультразвуковой замер
+    await asyncio.sleep(3)
+    distance_cm = 42.0  # 1 см = 1 ₽
 
+    pool = get_pool()
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            # убедимся, что у обоих есть кошелёк
-            await conn.execute(
-                "INSERT INTO wallets(user_id,balance) VALUES($1,0) ON CONFLICT DO NOTHING",
-                from_id
-            )
-            await conn.execute(
-                "INSERT INTO wallets(user_id,balance) VALUES($1,0) ON CONFLICT DO NOTHING",
-                to_id
-            )
-            # списываем у отправителя
-            row = await conn.fetchrow(
-                "UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 RETURNING balance",
-                distance_cm, from_id
-            )
-            if row is None:
-                raise HTTPException(400, "Отправитель не найден")
-            new_balance = float(row["balance"])
+        # 2) списываем у отправителя
+        row = await conn.fetchrow(
+            """
+            UPDATE wallets
+               SET available = available - $1
+             WHERE user_id = $2
+             RETURNING available
+            """,
+            distance_cm,
+            from_id,
+        )
+        if row is None:
+            raise HTTPException(400, "Sender wallet not found")
+        new_available = float(row["available"])
 
-            # зачисляем получателю
-            await conn.execute(
-                "UPDATE wallets SET balance = balance + $1 WHERE user_id = $2",
-                distance_cm, to_id
-            )
-            # сохраняем в историю переводов
-            await conn.execute(
-                "INSERT INTO transfers(from_user,to_user,amount) VALUES($1,$2,$3)",
-                from_id, to_id, distance_cm
-            )
+        # 3) зачисляем получателю
+        await conn.execute(
+            """
+            UPDATE wallets
+               SET available = available + $1
+             WHERE user_id = $2
+            """,
+            distance_cm,
+            to_id,
+        )
+
+        # 4) записываем историю переводов
+        await conn.execute(
+            """
+            INSERT INTO transfers (from_user, to_user, amount, created_at)
+            VALUES ($1, $2, $3, now())
+            """,
+            from_id,
+            to_id,
+            distance_cm,
+        )
 
     return {
         "distance_cm": distance_cm,
         "transferred": distance_cm,
-        "new_balance": new_balance
+        "new_available": new_available,
     }
