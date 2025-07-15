@@ -121,12 +121,10 @@ async def claim_token(payload: ClaimIn, user=Depends(current_user)):
         )
         if not row:
             raise HTTPException(404, "Токен не найден или уже использован")
-        # списываем reserved у отправителя
         await conn.execute(
             "UPDATE wallets SET reserved = reserved - $1 WHERE user_id = $2",
             row["amount"], row["user_id"]
         )
-        # зачисляем получателю
         await conn.execute(
             "UPDATE wallets SET available = available + $1 WHERE user_id = $2",
             row["amount"], user["user_id"]
