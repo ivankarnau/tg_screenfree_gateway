@@ -1,9 +1,16 @@
+# gateway/deps.py
+
+import os
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from db import get_pool
 
-JWT_SECRET = os.getenv("JWT_SECRET")  # должен быть задан в Railway
+# Читаем секрет из окружения
+JWT_SECRET = os.getenv("JWT_SECRET")  
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET не задана в окружении")
+
 ALGORITHM = "HS256"
 bearer = HTTPBearer()
 
@@ -32,6 +39,7 @@ async def current_user(
             tg_id, first
         )
         uid = rec["id"]
+        # Гарантируем, что у пользователя есть запись в wallets
         await conn.execute(
             "INSERT INTO wallets (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
             uid
