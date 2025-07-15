@@ -1,35 +1,45 @@
-# db.py
 import os
 import asyncpg
 from fastapi import FastAPI
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL не задана в окружении")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL не задана") 
 
-pool: asyncpg.Pool | None = None
+_pool: asyncpg.Pool | None = None
 
 async def init_db(app: FastAPI):
-    global pool
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    async with pool.acquire() as conn:
-        # создаём таблицы, если их ещё нет
+    global _pool
+    _pool = await asyncpg.create_pool(dsn=DB_URL)
+    # создаём таблицы, если их нет
+    async with _pool.acquire() as conn:
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS wallets (
-          user_id BIGINT PRIMARY KEY,
-          balance NUMERIC(18,2) NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          telegram_id BIGINT UNIQUE NOT NULL,
+          first_name TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS transfers (
-          id BIGSERIAL PRIMARY KEY,
-          from_user BIGINT NOT NULL REFERENCES wallets(user_id),
-          to_user   BIGINT NOT NULL REFERENCES wallets(user_id),
-          amount    NUMERIC(18,2) NOT NULL,
-          ts        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        CREATE TABLE IF NOT EXISTS wallets (
+          user_id INT PRIMARY KEY REFERENCES users(id),
+          available NUMERIC(12,2) NOT NULL DEFAULT 0,
+          reserved NUMERIC(12,2) NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS tokens (
+          token_id UUID PRIMARY KEY,
+          user_id INT REFERENCES users(id),
+          amount NUMERIC(12,2) NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+          redeemed_at TIMESTAMP WITH TIME ZONE
         );
         """)
-    app.state.db = pool
 
 async def close_db():
-    global pool
-    if pool:
-        await pool.close()
+    global _pool
+    if _pool:
+        await _pool.close()
+
+def get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Database not initialized")
+    return _pool
