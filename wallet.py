@@ -20,13 +20,15 @@ class TokenOut(BaseModel):
     amount: float
     created_at: datetime
     redeemed_at: datetime | None = None
+    pin: str | None = None
 
 class ReserveIn(BaseModel):
     amount: float
+    pin: str
 
-class RedeemIn(BaseModel):
+class ClaimIn(BaseModel):
     token_id: str
-    to_user_id: int  # Кому переводим этот токен
+    pin: str
 
 @router.get("/balance", response_model=BalanceOut)
 async def get_balance(user=Depends(current_user)):
@@ -68,12 +70,7 @@ async def get_tokens(user=Depends(current_user)):
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT token_id, amount, created_at, redeemed_at
-              FROM tokens
-             WHERE user_id = $1
-             ORDER BY created_at DESC
-            """,
+            "SELECT token_id, amount, created_at, redeemed_at, pin FROM tokens WHERE user_id = $1 ORDER BY created_at DESC",
             user["user_id"]
         )
     return [
@@ -82,6 +79,7 @@ async def get_tokens(user=Depends(current_user)):
             amount=float(r["amount"]),
             created_at=r["created_at"],
             redeemed_at=r["redeemed_at"],
+            pin=r["pin"]
         )
         for r in rows
     ]
@@ -89,6 +87,7 @@ async def get_tokens(user=Depends(current_user)):
 @router.post("/reserve", response_model=TokenOut)
 async def reserve_token(payload: ReserveIn, user=Depends(current_user)):
     amt = payload.amount
+    pin = payload.pin
     pool = get_pool()
     async with pool.acquire() as conn:
         rec = await conn.fetchrow(
@@ -103,39 +102,42 @@ async def reserve_token(payload: ReserveIn, user=Depends(current_user)):
             amt, user["user_id"]
         )
         await conn.execute(
-            "INSERT INTO tokens (token_id, user_id, amount) VALUES ($1, $2, $3)",
-            token_id, user["user_id"], amt
+            "INSERT INTO tokens (token_id, user_id, amount, pin) VALUES ($1, $2, $3, $4)",
+            token_id, user["user_id"], amt, pin
         )
         row = await conn.fetchrow(
-            "SELECT token_id, amount, created_at, redeemed_at FROM tokens WHERE token_id = $1",
+            "SELECT token_id, amount, created_at, redeemed_at, pin FROM tokens WHERE token_id = $1",
             token_id
         )
     return TokenOut(
         token_id=str(row["token_id"]),
         amount=float(row["amount"]),
         created_at=row["created_at"],
-        redeemed_at=row["redeemed_at"]
+        redeemed_at=row["redeemed_at"],
+        pin=row["pin"]
     )
 
-@router.post("/redeem", response_model=TokenOut)
-async def redeem_token(payload: RedeemIn, user=Depends(current_user)):
+@router.post("/claim", response_model=TokenOut)
+async def claim_token(payload: ClaimIn, user=Depends(current_user)):
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM tokens WHERE token_id = $1 AND user_id = $2 AND redeemed_at IS NULL",
-            payload.token_id, user["user_id"]
+            "SELECT * FROM tokens WHERE token_id = $1 AND redeemed_at IS NULL",
+            payload.token_id
         )
         if not row:
             raise HTTPException(404, "Токен не найден или уже использован")
-        # списываем reserved
+        if row["pin"] != payload.pin:
+            raise HTTPException(400, "Неверный PIN для токена")
+        # списываем reserved у отправителя
         await conn.execute(
             "UPDATE wallets SET reserved = reserved - $1 WHERE user_id = $2",
-            row["amount"], user["user_id"]
+            row["amount"], row["user_id"]
         )
         # зачисляем получателю
         await conn.execute(
             "UPDATE wallets SET available = available + $1 WHERE user_id = $2",
-            row["amount"], payload.to_user_id
+            row["amount"], user["user_id"]
         )
         # отмечаем токен как погашенный
         await conn.execute(
@@ -143,12 +145,13 @@ async def redeem_token(payload: RedeemIn, user=Depends(current_user)):
             payload.token_id
         )
         row2 = await conn.fetchrow(
-            "SELECT token_id, amount, created_at, redeemed_at FROM tokens WHERE token_id = $1",
+            "SELECT token_id, amount, created_at, redeemed_at, pin FROM tokens WHERE token_id = $1",
             payload.token_id
         )
     return TokenOut(
         token_id=str(row2["token_id"]),
         amount=float(row2["amount"]),
         created_at=row2["created_at"],
-        redeemed_at=row2["redeemed_at"]
+        redeemed_at=row2["redeemed_at"],
+        pin=row2["pin"]
     )
