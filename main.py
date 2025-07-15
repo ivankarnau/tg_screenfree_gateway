@@ -1,16 +1,15 @@
-import os
+# gateway/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from auth import router as auth_router
-from wallet import router as wallet_router
-from sonic import router as sonic_router
-from bank_mock import router as bank_router
-from db import init_db, close_db
+from auth       import router as auth_router
+from wallet     import router as wallet_router
+from sonic      import router as sonic_router
+from bank_mock  import router as bank_router
+from db         import init_db, close_db
 
 app = FastAPI(title="ScreenFree Gateway")
 
-# Убираем allow_credentials, чтобы не конфликтовать с allow_origins=["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,8 +28,8 @@ async def on_shutdown():
 
 app.include_router(auth_router)    # /auth/telegram
 app.include_router(wallet_router)  # /wallet/*
+app.include_router(bank_router)    # /bank/issuance
 app.include_router(sonic_router)   # /sonic/*
-app.include_router(bank_router)    # /bank/*
 
 @app.get("/ping")
 async def ping():
